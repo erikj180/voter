@@ -62,6 +62,7 @@ RAM for signed linear audio of the necessary buffer size; sigh!
 #include <time.h>
 #include <math.h>
 #include <dsp.h>
+  
 
 /* Debug values:
 
@@ -288,7 +289,7 @@ ROM char gpsmsg1[] = "GPS Receiver Active, waiting for aquisition\n", gpsmsg2[] 
  
 char newvalerror[] = "Invalid Entry, Value Not Changed\n", newvalnotchanged[] = "No Entry Made, Value Not Changed\n",
 	badmix[] = "  ERROR! Host rejecting connection\n",hosttmomsg[] = "  ERROR! Host response timeout\n",
-	VERSION[] = "1.51 08/07/2017";
+	VERSION[] = "Chuck-1.50-SMT-WA1JHK 01/06/2021a";
 
 typedef struct {
 	DWORD vtime_sec;
@@ -940,7 +941,7 @@ BOOL ppsx;
 	if (ppsx || (ppstimer >= PPS_MUSTA_TIME))
 	{
 		if (USE_PPS && (!indiag))
-		{
+		{ 
 			ppstimer = 0;
 			ppswarn = 0;
 			if ((gps_state == GPS_STATE_VALID) && (!gotpps))
@@ -957,7 +958,7 @@ BOOL ppsx;
 			else if (gotpps) 
 			{
 				if (ppscount >= 3)
-				{
+				{ 
 					T4CON = 0x10;			//TMR4 divide Fosc by 8
 					PR4 = AppConfig.LaunchDelay + 5; // Give 1us to let it get outa the CN interrupt!!!! :-)		
 					TMR4 = 0;
@@ -965,10 +966,10 @@ BOOL ppsx;
 					IEC1bits.T4IE = 1;
 					IPC6bits.T4IP = 6;
 					T4CONbits.TON = 1;
-	
-					if ((samplecnt >= 7999) && (samplecnt <= 8001))
+
+						last_samplecnt = samplecnt;	
+					if ((samplecnt >= 7999) && (samplecnt <= 8001 /*8001*/))
 					{
-						last_samplecnt = samplecnt;
 						sendgps = 1;
 						real_time++;
 						if ((samplecnt < 8000) && (!SIMULCAST_ENABLE)) // If we are short one, insert another
@@ -2262,6 +2263,42 @@ static ROM char notime[] = "<System Time Not Set>",
 	return(str);
 }
 
+
+// 210106drm, WA1JHK, workaround defect in mktime provided in the MPLab library
+//
+static DWORD getSecondsSinceEpoch (struct tm *tm)
+{
+    #define SECONDS_EPOCH_TO_1121 1609459200  // seconds 1/1/1970 until 1/1/2021 0:0:0
+    #define SECONDS_PER_DAY 86400             // 60 * 60 * 24
+    #define SECONDS_PER_YEAR 31536000         // SECONDS_PER_DAY * 365
+
+    DWORD   total_seconds;
+    
+    // days before current month in current year
+    static ROM int normal_year[] = {0,31,59,90,120,151,181,212,243,273,304,334};
+    
+
+    // SECONDS_EPOCH_TO_1121 is seconds from 1/1/70 0:0:0 up to 1/1/21 0:0:0
+    total_seconds = SECONDS_EPOCH_TO_1121;
+    // seconds elapsed current day since midnight
+    total_seconds = total_seconds + ((DWORD)tm->tm_sec + ((DWORD)tm->tm_min * 60) + ((DWORD)tm->tm_hour * 3600));
+    // seconds elapsed since 1st of month up to current day
+    total_seconds = total_seconds + (((DWORD)tm->tm_mday - 1) * SECONDS_PER_DAY);
+    // seconds elapsed since 1st of year up to current month
+    total_seconds = total_seconds + (normal_year[tm->tm_mon - 1] * SECONDS_PER_DAY);
+    // seconds elapsed since 1st of year up to current month
+    total_seconds = total_seconds + ((tm->tm_year - 21) * SECONDS_PER_YEAR);
+    // seconds for leap day added for March thru December in leap year
+    if (((tm->tm_year % 4) == 0) & (tm->tm_mon > 2))
+    {
+        total_seconds = total_seconds + SECONDS_PER_DAY;
+    }
+    // seconds for extra leap days for all past years
+    total_seconds = total_seconds + (((tm->tm_year - 21) / 4) * SECONDS_PER_DAY);
+
+    return  (total_seconds);
+}
+
 void process_gps(void)
 {
 int n;
@@ -2348,7 +2385,11 @@ extern float doubleify(BYTE *p);
 				ggps_unavail = 0;
 			}
 #endif
-			memset(&tm,0,sizeof(tm));
+			// example GPS string
+            // $GPRMC,194013.00,A,4032.94888,N,10511.83890,W,0.005,,020121,,,D*62
+            //        hhmmss                                        ddmmyy
+            // Use tm to pass binary time to getSecondsSinceEpoch
+            memset(&tm,0,sizeof(tm));
 			tm.tm_sec = twoascii(strs[1] + 4);
 			tm.tm_min = twoascii(strs[1] + 2);
 			tm.tm_hour = twoascii(strs[1]);
@@ -2356,16 +2397,22 @@ extern float doubleify(BYTE *p);
 			if (AppConfig.DebugLevel & 128)
 				tm.tm_mon = twoascii(strs[9] + 2);
 			else
-				tm.tm_mon = twoascii(strs[9] + 2) - 1;
-			tm.tm_year = twoascii(strs[9] + 4) + 100;
-			if (AppConfig.DebugLevel & 64)
-				gps_time = (DWORD) mktime(&tm) + 1;
-			else
-				gps_time = (DWORD) mktime(&tm);
-			if (AppConfig.DebugLevel & 32)
-				printf("GPS-DEBUG: mon: %d, gps_time: %ld, ctime: %s\n",tm.tm_mon,gps_time,ctime((time_t *)&gps_time));
-			if (!USE_PPS) system_time.vtime_sec = timing_time = real_time = gps_time + 1;
-			return;
+				//tm.tm_mon = twoascii(strs[9] + 2) - 1;    //210106drm
+				tm.tm_mon = twoascii(strs[9] + 2);          //210106drm
+			//tm.tm_year = twoascii(strs[9] + 4) + 100;     //210106drm
+			tm.tm_year = twoascii(strs[9] + 4);             //210106drm
+            
+            // 210106drm, WA1JHK, workaround defect in mktime provided in the MPLab library
+            gps_time = getSecondsSinceEpoch (&tm);
+            //if (AppConfig.DebugLevel & 64)
+            //  gps_time = (DWORD) mktime(&tm) + 1;
+            //else
+            //  gps_time = (DWORD) mktime(&tm);
+            
+            if (AppConfig.DebugLevel & 32)
+                printf("GPS-DEBUG: mon: %d, gps_time: %ld, ctime: %s\n",tm.tm_mon,gps_time,ctime((time_t *)&gps_time));
+            if (!USE_PPS) system_time.vtime_sec = timing_time = real_time = gps_time + 1;
+            return;
 		}
 	
 		if (n < 7) return;
@@ -2433,10 +2480,15 @@ extern float doubleify(BYTE *p);
 			if (AppConfig.DebugLevel & 128)
 				tm.tm_mon = gps_buf[15]; 
 			else
-				tm.tm_mon = gps_buf[15] - 1; 
+				//tm.tm_mon = gps_buf[15] - 1;          //210106drm 
+				tm.tm_mon = gps_buf[15];                //210106drm
 			w = gps_buf[17] | ((WORD)gps_buf[16] << 8);
-			tm.tm_year = w - 1900;
-			gps_time = (DWORD) mktime(&tm) + 619315200;
+			//tm.tm_year = w - 1900;                    //210106drm
+			tm.tm_year = w - 2000;                      //210106drm
+
+            // 210106drm, WA1JHK, workaround defect in mktime provided in the MPLab library
+            gps_time = getSecondsSinceEpoch (&tm);
+            // gps_time = (DWORD) mktime_fixed(&tm);    //210106drm
 			if (!USE_PPS) system_time.vtime_sec = timing_time = gps_time + 1;
 			return;
 		}
